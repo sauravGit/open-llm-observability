@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-llm-obs"
+version = "0.1.0"
+description = "A vendor-neutral, OpenTelemetry-compatible SDK for LLM observability"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "sauravGit" }]
+keywords = ["llm", "observability", "opentelemetry", "otel", "metrics", "tracing", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+]
+examples = [
+    "openai>=1.0",
+    "anthropic>=0.20",
+]
+
+[project.urls]
+Homepage = "https://github.com/sauravGit/open-llm-observability"
+Repository = "https://github.com/sauravGit/open-llm-observability"
+Issues = "https://github.com/sauravGit/open-llm-observability/issues"
+Discussions = "https://github.com/sauravGit/open-llm-observability/discussions"
+
+[tool.hatch.build.targets.wheel]
+packages = ["open_llm_obs"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
