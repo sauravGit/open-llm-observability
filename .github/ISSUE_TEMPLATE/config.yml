@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a Question / Start a Discussion
+    url: https://github.com/sauravGit/open-llm-observability/discussions
+    about: Please ask and answer questions here.
+  - name: RFC Discussion
+    url: https://github.com/sauravGit/open-llm-observability/discussions
+    about: Propose changes to the Universal LLM Observability Semantic Convention.
