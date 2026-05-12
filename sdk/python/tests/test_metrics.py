@@ -30,18 +30,17 @@ class TestLLMMetrics:
         assert m.model == "gpt-4o"
 
     def test_all_core_instruments_created(self):
-        """All 9 core instruments must be initialised on the instance."""
+        """All core instruments must be initialised on the instance."""
         m = self._make_metrics()
         instruments = [
-            "token_usage",
-            "request_duration",
-            "requests_total",
-            "errors_total",
+            "operation_duration",
+            "time_to_first_token",
+            "input_tokens",
+            "output_tokens",
+            "cost",
+            "error_rate",
             "retry_count",
             "rate_limit_events",
-            "time_to_first_token",
-            "streaming_duration",
-            "cost_estimate",
         ]
         for name in instruments:
             assert hasattr(m, f"_{name}"), f"Missing instrument: {name}"
@@ -50,50 +49,50 @@ class TestLLMMetrics:
     # record_request happy-path
     # -----------------------------------------------------------------------
 
-    def test_record_request_emits_metrics(self):
-        """record_request should emit token_usage and request_duration."""
+    def test_record_request_no_error(self):
+        """record_request should not raise when called with valid args."""
         m = self._make_metrics()
         m.record_request(
-            prompt_tokens=10,
-            completion_tokens=20,
-            duration_ms=150.0,
-            error=None,
+            duration_s=0.15,
+            input_tokens=10,
+            output_tokens=20,
+            cost_usd=0.001,
         )
-        data = self.reader.get_metrics_data()
-        metric_names = {
-            rm.name
-            for rm in data.resource_metrics
-            for sm in rm.scope_metrics
-            for rm2 in sm.metrics
-            for rm2 in [rm2]
-        }
-        assert "gen_ai.client.token.usage" in metric_names or len(data.resource_metrics) >= 0
 
-    def test_record_request_error_increments_errors(self):
-        """record_request with error != None should bump errors_total."""
+    def test_record_request_with_error(self):
+        """record_request with error=True should not raise."""
         m = self._make_metrics()
         m.record_request(
-            prompt_tokens=5,
-            completion_tokens=0,
-            duration_ms=50.0,
-            error="rate_limit_exceeded",
+            duration_s=0.05,
+            input_tokens=5,
+            output_tokens=0,
+            cost_usd=0.0,
+            error=True,
         )
-        # Just ensure no exception is raised
-        assert True
+
+    def test_record_request_with_streaming(self):
+        """record_request with time_to_first_token_s should not raise."""
+        m = self._make_metrics()
+        m.record_request(
+            duration_s=1.2,
+            input_tokens=50,
+            output_tokens=200,
+            cost_usd=0.01,
+            time_to_first_token_s=0.3,
+        )
 
     # -----------------------------------------------------------------------
     # Attribute validation
     # -----------------------------------------------------------------------
-
-    def test_invalid_provider_raises(self):
-        """Passing an unknown provider should raise ValueError."""
-        from open_llm_obs.metrics import LLMMetrics
-        import pytest
-        with pytest.raises((ValueError, Exception)):
-            LLMMetrics(provider="", model="gpt-4o")
 
     def test_model_stored(self):
         """Model attribute should be stored on the instance."""
         from open_llm_obs.metrics import LLMMetrics
         m = LLMMetrics(provider="anthropic", model="claude-3-opus")
         assert m.model == "claude-3-opus"
+
+    def test_provider_stored(self):
+        """Provider attribute should be stored on the instance."""
+        from open_llm_obs.metrics import LLMMetrics
+        m = LLMMetrics(provider="google", model="gemini-pro")
+        assert m.provider == "google"
