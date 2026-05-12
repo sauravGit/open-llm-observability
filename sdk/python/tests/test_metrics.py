@@ -43,7 +43,7 @@ class TestLLMMetrics:
             "rate_limit_events",
         ]
         for name in instruments:
-            assert hasattr(m, f"_{name}"), f"Missing instrument: {name}"
+            assert hasattr(m, name), f"Missing instrument: {name}"
 
     # -----------------------------------------------------------------------
     # record_request happy-path
