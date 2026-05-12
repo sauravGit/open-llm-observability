@@ -1,6 +1,6 @@
 """Unit tests for open_llm_obs.metrics (LLMMetrics) — RFC-0001 v0.2."""
-import pytest
-from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
+
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
