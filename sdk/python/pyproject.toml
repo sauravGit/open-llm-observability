@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "open-llm-obs"
 version = "0.1.0"
 description = "A vendor-neutral, OpenTelemetry-compatible SDK for LLM observability"
-readme = "README.md"
+readme = "../../README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "sauravGit" }]
 keywords = ["llm", "observability", "opentelemetry", "otel", "metrics", "tracing", "ai"]
