@@ -1,4 +1,4 @@
-"""metrics.py - Canonical LLM metric definitions per RFC-0001 v0.2.
+"""metrics.py - Canonical LLM metric definitions per RFC-0001 v0.4.
 
 All metric names, instruments, and units follow the gen_ai.* namespace
 as defined in RFC-0001: LLM Observability Semantic Conventions for OpenTelemetry.
@@ -10,11 +10,11 @@ from __future__ import annotations
 from typing import Optional
 from opentelemetry import metrics
 
-_meter = metrics.get_meter("open_llm_obs", version="0.2.0")
+_meter = metrics.get_meter("open_llm_obs", version="0.4.0")
 
 
 class LLMMetrics:
-    """Canonical LLM metrics as defined in RFC-0001 v0.2.
+    """Canonical LLM metrics as defined in RFC-0001 v0.4.
 
     All metric names follow the gen_ai.* namespace convention.
     Instruments and units match the RFC-0001 Core Metrics schema exactly.
