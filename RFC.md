@@ -1,11 +1,23 @@
 # RFC-0001: LLM Observability Normalization Layer for OpenTelemetry GenAI
 
-**Status:** Draft v0.3
-**Author:** sauravGit
-**Date:** 2026-05-06
-**License:** Apache 2.0
-**Discussion:** https://github.com/sauravGit/open-llm-observability/discussions/1
-**Upstream:** https://github.com/open-telemetry/semantic-conventions-genai/issues/101
+**Status:** Draft v0.4  
+**Author:** sauravGit  
+**Date:** 2026-05-12  
+**License:** Apache 2.0  
+**Discussion:** https://github.com/sauravGit/open-llm-observability/discussions/1  
+**Upstream:** https://github.com/open-telemetry/semantic-conventions-genai/issues/101  
+**Spec:** https://github.com/sauravGit/open-llm-observability/blob/main/RFC.md
+
+---
+
+## Change Log
+
+| Version | Date | Key Changes |
+|---------|------|-------------|
+| v0.4 | 2026-05-12 | Formalized reconciliation with OTel GenAI client spec; clarified normalization vs. extension boundary; added TTFT streaming attribute; resolved cost unit recommendation; added agent/tool-call span naming convention; expanded migration shims to 5 platforms |
+| v0.3 | 2026-05-06 | Reframed as normalization/migration layer; added OpenInference mappings; moved cost to optional extension pack; consolidated upstream OTel issues |
+| v0.2 | 2026-05-04 | Added extension packs (RAG, Agents, Eval, Safety); sync SDK metrics.py |
+| v0.1 | 2026-05-02 | Initial spec: core metrics, span attributes, KPIs |
 
 ---
 
@@ -22,7 +34,7 @@
 9. [Migration Guide](#migration-guide)
 10. [Working SDK Examples](#working-sdk-examples)
 11. [Dashboard Templates](#dashboard-templates)
-12. [Real-World Use Cases](#real-world-use-cases)
+12. [Agent & Tool-Call Span Naming](#agent--tool-call-span-naming)
 13. [Upstream Path to OpenTelemetry](#upstream-path-to-opentelemetry)
 14. [Versioning and Evolution Policy](#versioning-and-evolution-policy)
 15. [Open Questions for the Community](#open-questions-for-the-community)
@@ -30,294 +42,483 @@
 
 ---
 
-## Abstract
+## 1. Abstract
 
-This RFC proposes a **normalization and migration layer on top of existing OpenTelemetry GenAI semantic conventions and OpenInference**, not a parallel new standard. OpenTelemetry already defines core GenAI metrics such as `gen_ai.client.operation.duration`, `gen_ai.client.operation.time_to_first_chunk`, `gen_ai.server.time_to_first_token`, and `gen_ai.client.token.usage`. This work extends and consolidates those conventions — adding missing signals (error rate, retry count, rate-limit events), resolving open schema questions (cost unit, TTFT streaming flag, error instrument type), and providing a migration guide from fragmented vendor-specific naming to the canonical `gen_ai.*` namespace.
+This RFC defines a **vendor-neutral, OpenTelemetry-compatible normalization layer** for LLM observability. It does not propose a parallel standard; instead, it formalizes a consistent schema that extends and reconciles existing OTel GenAI semantic conventions (`gen_ai.client.operation.duration`, `gen_ai.server.time_to_first_token`, `gen_ai.client.token.usage`) into a complete, interoperable client-side metric set.
 
-The goal is to ship a complete, stable client metric set that the OpenTelemetry GenAI SIG can adopt, replacing the current patchwork of per-issue additions with a single coherent surface.
+**This spec is a normalization and migration layer**, not a 
+---
+
+## 2. The Fragmentation Problem
+
+Every LLM platform and observability tool today uses different field names, KPI definitions, and export formats. Developers who want end-to-end visibility across multiple providers or backends have to re-instrument every time.
+
+| Signal | OpenLLMetry | Langfuse | OpenInference | Arize Phoenix | AWS Bedrock | Canonical (`gen_ai.*`) |
+|--------|-------------|----------|---------------|---------------|-------------|------------------------|
+| E2E latency | `llm.request.duration` (ms) | `observation.latency` (ms) | `llm.latency` | `llm.latency_ms` | `FirstByteLatency` + `TotalInferenceTime` | `gen_ai.client.operation.duration` (s) |
+| Input tokens | `llm.usage.prompt_tokens` | `usage.input` | `llm.token_count.prompt` | `llm.token_count.prompt` | `InputTokenCount` | `gen_ai.usage.input_tokens` |
+| Output tokens | `llm.usage.completion_tokens` | `usage.output` | `llm.token_count.completion` | `llm.token_count.completion` | `OutputTokenCount` | `gen_ai.usage.output_tokens` |
+| Cost | `llm.usage.total_cost` | `usage.totalCost` | `llm.cost.total` | (proxy) | CloudWatch custom metric | `gen_ai.usage.cost` (optional) |
+| TTFT | (none) | (none) | (none) | (none) | `TimeToFirstByte` | `gen_ai.client.time_to_first_token` |
+| Errors | (none) | `error_count` | (none) | (none) | `ThrottlingException` | `gen_ai.client.error_count` |
+| Retries | (none) | (none) | (none) | (none) | (none) | `gen_ai.client.retry_count` |
+| Rate limits | (none) | (none) | (none) | (none) | `ThrottlingException` | `gen_ai.client.rate_limit.events` |
+
+This fragmentation means dashboards, alerts, and ML pipelines cannot be ported between tools without custom transforms.
 
 ---
 
-## The Fragmentation Problem
+## 3. Prior Art and Precedent
 
-Every major LLM observability tool today emits the same core signals under different names, making cross-tool dashboards, alerts, and cost attribution impossible without custom ETL.
+This spec builds on established work:
 
-| Signal | OpenLLMetry | Langfuse | OpenInference / Arize Phoenix | AWS Bedrock | OTel GenAI (current) |
-|---|---|---|---|---|---|
-| E2E latency | `llm.request.duration` | `latency` (ms) | `llm.latency` | `InvocationLatency` | `gen_ai.client.operation.duration` (s) |
-| Time to first token | — | — | — | `FirstByteLatency` | `gen_ai.server.time_to_first_token` |
-| Input tokens | `gen_ai.usage.prompt_tokens` | `usage_details.input` | `llm.token_count.prompt` | `InputTokenCount` | `gen_ai.client.token.usage` {`input`} |
-| Output tokens | `gen_ai.usage.completion_tokens` | `usage_details.output` | `llm.token_count.completion` | `OutputTokenCount` | `gen_ai.client.token.usage` {`output`} |
-| Cost | `llm.usage.total_cost` | `cost_details.total` | `llm.cost.total` | (derived) | *(not yet standardized)* |
-| Error rate | — | — | — | `InvocationErrors` | *(not yet standardized)* |
-| Retry count | — | — | — | — | *(not yet standardized)* |
-| Rate limit events | — | — | — | `ThrottledInvocations` | *(not yet standardized)* |
+- **OpenTelemetry GenAI Semantic Conventions** — The upstream `gen_ai.client.*` and `gen_ai.server.*` namespaces are the foundation. This RFC maps into them, not around them.
+- **OpenInference** — Arize's cross-platform tracing convention (`llm.*`) is the most widely adopted fragmentation pattern to normalize.
+- **Langfuse Observability** — Popular open-source LLM observability platform with its own schema.
+- **OpenLLMetry (Traceloop)** — Early open-source standardization attempt using `llm.*` prefix.
+- **AWS Bedrock Telemetry** — CloudWatch-based instrumentation for Bedrock model invocations.
 
-**Root cause:** The OTel GenAI semantic conventions exist but are incomplete — TTFT, detailed token usage, cost, error/retry/rate-limit signals are tracked in separate issues (#14, #23, #76, #93) with no unified proposal to resolve them together. This RFC is that unified proposal.
+This RFC's contribution: a complete, reconciled mapping that implementers can use as a drop-in normalization shim.
 
 ---
 
-## Prior Art and Precedent
+## 4. Scope
 
-This work builds directly on:
+**In scope (Core - REQUIRED):**
+- Request/response latency (`gen_ai.client.operation.duration`)
+- Token usage: input, output, total (`gen_ai.usage.input_tokens`, `.output_tokens`, `.total_tokens`)
+- Time-to-first-token for streaming (`gen_ai.client.time_to_first_token`)
+- Per-request error signaling (`gen_ai.client.error_count`)
+- Retry attempt counts (`gen_ai.client.retry_count`)
+- Rate-limit event signals (`gen_ai.client.rate_limit.events`)
 
-- **OTel GenAI semantic conventions** — `gen_ai.client.operation.duration`, `gen_ai.server.time_to_first_token`, `gen_ai.client.token.usage` are already in the spec. This RFC extends them.
-- **OpenInference** (Arize Phoenix) — defines `llm.token_count.*`, `llm.latency`, `llm.cost.total`; the migration table above maps these to canonical names.
-- **OTel spec discussion #5069** — @trask redirected the community to `semantic-conventions-genai` as the right upstream venue. This RFC was formally filed as issue #101 there.
-- **HTTP and RPC conventions** — `http.client.request.duration` uses seconds (s); we follow that precedent for `gen_ai.client.operation.duration`.
-- **Prior issues** — #14 (TTFT), #23 (token usage detail), #76 (streaming), #93 (provider attribute on duration) are consolidated here.
-
----
-
-## Scope
-
-**In scope:**
-- Client-side metric instruments for LLM request observability
-- Required span/metric attributes
-- Derived KPI formulas computable from the canonical schema
-- Migration mappings from OpenLLMetry, Langfuse, OpenInference, and Bedrock
-- Extension packs for cost, RAG, agent, and eval signals
+**In scope (Extension packs):**
+- Cost tracking (`gen_ai.usage.cost`)
+- RAG signals (retrieval latency, document counts, reranking scores)
+- Agent/tool-call tracing (step counts, tool invocations, agent duration)
+- Eval/guardrail scores
 
 **Out of scope:**
-- Server-side / provider-internal instrumentation
-- Trace/span schema beyond attributes needed to correlate with metrics
-- ML training or batch inference pipelines
+- Training/fine-tuning job telemetry (separate OTel GenAI area)
+- Model provider-specific attributes (covered by `gen_ai.system`)
+- Distributed tracing span hierarchy beyond LLM-specific spans
 
 ---
 
-## Canonical Metric Schema
+## 5. Canonical Metric Schema
 
-All metrics use the `gen_ai.*` namespace, consistent with existing OTel GenAI conventions.
-
-### Core (REQUIRED)
+### 5.1 Core Metrics (REQUIRED)
 
 | Metric | Instrument | Unit | Description |
-|---|---|---|---|
-| `gen_ai.client.operation.duration` | Histogram | `s` | End-to-end request latency. Consistent with OTel HTTP/RPC conventions (`http.client.request.duration` is also in `s`). |
-| `gen_ai.client.time_to_first_token` | Histogram | `s` | Streaming-only: time from request start to first token received. SHOULD be omitted for non-streaming calls. |
-| `gen_ai.usage.input_tokens` | Counter | `{token}` | Input tokens consumed. Allows backends to compute rate and total from a single instrument. |
-| `gen_ai.usage.output_tokens` | Counter | `{token}` | Output tokens generated. |
-| `gen_ai.client.error_rate` | Gauge | `1` | Per-request error signal. Alternative: counter pair `gen_ai.client.error_count` + `gen_ai.client.request_count` with ratio computed by backend. Open to SIG preference. |
-| `gen_ai.client.retry_count` | Counter | `{retry}` | Incremented on each retry attempt. |
-| `gen_ai.client.rate_limit.events` | Counter | `{event}` | Incremented on each HTTP 429 received. |
+|--------|------------|------|-------------|
+| `gen_ai.client.operation.duration` | Histogram | `s` | End-to-end request latency |
+| `gen_ai.client.time_to_first_token` | Histogram | `s` | Streaming-only: time until first token |
+| `gen_ai.usage.input_tokens` | Counter | `{token}` | Prompt/input tokens |
+| `gen_ai.usage.output_tokens` | Counter | `{token}` | Completion/output tokens |
+| `gen_ai.usage.total_tokens` | Counter | `{token}` | Sum of input + output tokens |
+| `gen_ai.client.error_count` | Counter | `{error}` | Per-request error signaling |
+| `gen_ai.client.retry_count` | Counter | `{retry}` | Retry attempts |
+| `gen_ai.client.rate_limit.events` | Counter | `{event}` | HTTP 429 / throttling events |
 
-### Extension: Cost Pack (`gen_ai.cost.*`)
+### 5.2 Required Resource Attributes
 
-Cost is intentionally moved out of Core REQUIRED because not all providers publish pricing programmatically, and floating-point precision in cumulative counters is an open question.
+| Attribute | Requirement | Description |
+|-----------|-------------|-------------|
+| `gen_ai.system` | Required | Provider identifier (e.g., `openai`, `anthropic`, `bedrock`) |
+| `gen_ai.request.model` | Required | Model name/version |
+| `gen_ai.operation.name` | Required | Operation type (`chat`, `completion`, `embedding`) |
+| `deployment.environment` | Recommended | Deployment environment |
+| `service.name` | Recommended | Application/service name |
 
-| Metric | Instrument | Unit | Notes |
-|---|---|---|---|
-| `gen_ai.usage.cost` | Counter | `{microdollar}` | Integer microdollars to avoid float drift. Alternative: `usd` float. Open question for SIG. |
+### 5.3 Recommended Span Attributes
 
-### Extension: RAG Pack (`gen_ai.rag.*`)
-
-| Metric | Instrument | Unit |
-|---|---|---|
-| `gen_ai.rag.retrieval.duration` | Histogram | `s` |
-| `gen_ai.rag.documents.retrieved` | Histogram | `{document}` |
-| `gen_ai.rag.rerank.score` | Gauge | `1` |
-
-### Extension: Agent Pack (`gen_ai.agent.*`)
-
-| Metric | Instrument | Unit |
-|---|---|---|
-| `gen_ai.agent.steps` | Counter | `{step}` |
-| `gen_ai.agent.tool_calls` | Counter | `{call}` |
-| `gen_ai.agent.task.duration` | Histogram | `s` |
-
-### Extension: Eval Pack (`gen_ai.eval.*`)
-
-| Metric | Instrument | Unit |
-|---|---|---|
-| `gen_ai.eval.score` | Gauge | `1` |
-| `gen_ai.eval.latency` | Histogram | `s` |
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `gen_ai.prompt.0.role` | string | Role of message 0 (`system`, `user`, `assistant`) |
+| `gen_ai.prompt.0.content` | string | Content of message 0 |
+| `gen_ai.completion.0.finish_reason` | string | Model's finish reason (`stop`, `length`, `tool_calls`) |
+| `gen_ai.response.model` | string | Actual model used (may differ from request) |
+| `gen_ai.usage.completion_tokens` | int | Mirror of output_tokens for compatibility |
 
 ---
 
-## Required Span Attributes
+## 6. Required Span Attributes
 
-Following the existing OTel GenAI spec pattern:
+This section consolidates the OTel GenAI conventions with LLM-specific extensions.
 
-| Attribute | Requirement |
-|---|---|
-| `gen_ai.system` | Required |
-| `gen_ai.request.model` | Required |
-| `gen_ai.operation.name` | Required |
-| `gen_ai.response.model` | Recommended |
-| `gen_ai.request.max_tokens` | Opt-In |
-| `server.address` | Recommended |
-| `server.port` | Opt-In |
+### 6.1 On Every LLM Span
 
----
+| Attribute | Requirement | Source |
+|-----------|-------------|--------|
+| `gen_ai.system` | MUST | OTel GenAI spec |
+| `gen_ai.request.model` | MUST | OTel GenAI spec |
+| `gen_ai.operation.name` | MUST | OTel GenAI spec |
+| `gen_ai.response.model` | SHOULD | OTel GenAI spec (post-response) |
 
-## Derived KPIs and Formulas
+### 6.2 On Chat/Completion Spans
 
-These KPIs are computable entirely from the canonical schema above — no vendor-specific fields required.
-
-| KPI | Formula |
-|---|---|
-| Cost per 1K output tokens | `gen_ai.usage.cost / (gen_ai.usage.output_tokens / 1000)` |
-| Token efficiency ratio | `gen_ai.usage.output_tokens / gen_ai.usage.input_tokens` |
-| Error rate % | `gen_ai.client.error_count / gen_ai.client.request_count * 100` |
-| P95 latency by model | `histogram_quantile(0.95, gen_ai.client.operation.duration{gen_ai.request.model=...})` |
-| Retry overhead % | `gen_ai.client.retry_count / gen_ai.client.request_count * 100` |
-| TTFT P50 (streaming) | `histogram_quantile(0.50, gen_ai.client.time_to_first_token)` |
+| Attribute | Requirement | Description |
+|-----------|-------------|-------------|
+| `gen_ai.prompt.*` | SHOULD | Message sequence |
+| `gen_ai.completion.*` | SHOULD | Response content and metadata |
+| `gen_ai.usage.input_tokens` | MUST | Token count |
+| `gen_ai.usage.output_tokens` | MUST | Token count |
+| `gen_ai.request.stream` | SHOULD | Boolean; true for streaming calls |
+| `gen_ai.request.temperature` | OPTIONAL | Sampling temperature |
+| `gen_ai.request.max_tokens` | OPTIONAL | Max output tokens |
+| `gen_ai.request.top_p` | OPTIONAL | Top-p sampling |
 
 ---
 
-## Extension Packs
+## 7. Derived KPIs and Formulas
 
-Extension packs are opt-in metric groups for use cases beyond core LLM request observability:
+Derived KPIs are computed from raw metrics and should not be emitted directly.
 
-| Pack | Prefix | Use Case |
-|---|---|---|
-| Cost | `gen_ai.cost.*` | Billing attribution, budget alerts |
-| RAG | `gen_ai.rag.*` | Retrieval pipeline observability |
-| Agent | `gen_ai.agent.*` | Multi-step agent task tracking |
-| Eval | `gen_ai.eval.*` | Quality scoring pipelines |
-
-Extension packs MUST NOT be required by backends that do not support them. Core pack metrics MUST be emitted for any LLM client request.
-
----
-
-## Migration Guide
-
-### From OpenLLMetry
-
-| OpenLLMetry | Canonical |
-|---|---|
-| `llm.request.duration` | `gen_ai.client.operation.duration` (convert ms → s) |
-| `gen_ai.usage.prompt_tokens` | `gen_ai.usage.input_tokens` |
-| `gen_ai.usage.completion_tokens` | `gen_ai.usage.output_tokens` |
-| `llm.usage.total_cost` | `gen_ai.usage.cost` (extension) |
-
-### From Langfuse
-
-| Langfuse | Canonical |
-|---|---|
-| `latency` (ms) | `gen_ai.client.operation.duration` (÷ 1000) |
-| `usage_details.input` | `gen_ai.usage.input_tokens` |
-| `usage_details.output` | `gen_ai.usage.output_tokens` |
-| `cost_details.total` | `gen_ai.usage.cost` (extension) |
-
-### From OpenInference / Arize Phoenix
-
-| OpenInference | Canonical |
-|---|---|
-| `llm.latency` | `gen_ai.client.operation.duration` |
-| `llm.token_count.prompt` | `gen_ai.usage.input_tokens` |
-| `llm.token_count.completion` | `gen_ai.usage.output_tokens` |
-| `llm.cost.total` | `gen_ai.usage.cost` (extension) |
-
-### From AWS Bedrock CloudWatch
-
-| Bedrock | Canonical |
-|---|---|
-| `InvocationLatency` | `gen_ai.client.operation.duration` |
-| `FirstByteLatency` | `gen_ai.client.time_to_first_token` |
-| `InputTokenCount` | `gen_ai.usage.input_tokens` |
-| `OutputTokenCount` | `gen_ai.usage.output_tokens` |
-| `ThrottledInvocations` | `gen_ai.client.rate_limit.events` |
+| KPI | Formula | Bucket |
+|-----|---------|--------|
+| Cost per 1K output tokens | `gen_ai.usage.cost / (gen_ai.usage.output_tokens / 1000)` | Cost (extension) |
+| Token efficiency ratio | `gen_ai.usage.output_tokens / gen_ai.usage.input_tokens` | Efficiency |
+| Error rate % | `(sum(gen_ai.client.error_count) / sum(request_count)) * 100` | Reliability |
+| P95 latency | `histogram_quantile(0.95, gen_ai.client.operation.duration)` | Performance |
+| P99 latency | `histogram_quantile(0.99, gen_ai.client.operation.duration)` | Performance |
+| Retry rate | `sum(gen_ai.client.retry_count) / sum(request_count)` | Reliability |
+| Rate-limit rate | `sum(gen_ai.client.rate_limit.events) / sum(request_count)` | Throttling |
+| Token throughput | `sum(gen_ai.usage.total_tokens) / elapsed_time` | Efficiency |
+| TTFT P95 | `histogram_quantile(0.95, gen_ai.client.time_to_first_token)` | Streaming |
 
 ---
 
-## Working SDK Examples
+## 8. Extension Packs
+
+### 8.1 Cost Extension
+
+| Metric | Instrument | Unit | Description |
+|--------|------------|------|-------------|
+| `gen_ai.usage.cost` | Counter | `{microdollar}` | Estimated request cost in microdollars |
+| `gen_ai.usage.cost.models` | Counter (per-label) | `{microdollar}` | Cost broken down by input vs output |
+
+**Recommendation:** Emit cost as `{microdollar}` (integer) rather than `usd` (float) for precision and to avoid floating-point rounding errors in aggregation. Microdollars provide 6 decimal places of USD precision.
+
+### 8.2 RAG Extension
+
+| Metric | Instrument | Unit | Description |
+|--------|------------|------|-------------|
+| `gen_ai.rag.retrieval.duration` | Histogram | `s` | Vector DB retrieval latency |
+| `gen_ai.rag.documents.retrieved` | Histogram | `{doc}` | Documents retrieved per query |
+| `gen_ai.rag.rerank.score` | Histogram | `1` | Reranking score (0-1) |
+| `gen_ai.rag.context.precision` | Gauge | `1` | Precision of retrieved context |
+
+### 8.3 Agent Extension
+
+| Metric | Instrument | Unit | Description |
+|--------|------------|------|-------------|
+| `gen_ai.agent.steps` | Histogram | `{step}` | Number of agent steps per task |
+| `gen_ai.agent.tool_calls` | Counter | `{call}` | Tool/function calls made |
+| `gen_ai.agent.task.duration` | Histogram | `s` | Total agent task duration |
+| `gen_ai.agent.loop.iterations` | Gauge | `{iter}` | Current loop iteration count |
+
+### 8.4 Eval Extension
+
+| Metric | Instrument | Unit | Description |
+|--------|------------|------|-------------|
+| `gen_ai.eval.score` | Gauge | `1` | Evaluation score (0-1) |
+| `gen_ai.eval.latency` | Histogram | `s` | Time to run evaluation |
+| `gen_ai.eval.groundedness` | Gauge | `1` | Response groundedness score |
+
+### 8.5 Safety Extension
+
+| Metric | Instrument | Unit | Description |
+|--------|------------|------|-------------|
+| `gen_ai.safety.flag_count` | Counter | `{flag}` | Safety flag triggers |
+| `gen_ai.safety.filtered_tokens` | Counter | `{token}` | Tokens filtered/redacted |
+
+---
+
+## 9. Migration Guide
+
+Use these transforms to normalize existing instrumentation to canonical `gen_ai.*` names.
+
+### 9.1 OpenLLMetry to Canonical
+
+| OpenLLMetry | Canonical | Transform |
+|-------------|-----------|----------|
+| `llm.request.duration` | `gen_ai.client.operation.duration` | `/1000` (ms to s) |
+| `llm.usage.prompt_tokens` | `gen_ai.usage.input_tokens` | 1:1 |
+| `llm.usage.completion_tokens` | `gen_ai.usage.output_tokens` | 1:1 |
+| `llm.usage.total_cost` | `gen_ai.usage.cost` | `*1_000_000` (USD to microdollars) |
+| `llm.request.model` | `gen_ai.request.model` | 1:1 |
+| `llm.system` | `gen_ai.system` | 1:1 |
+
+### 9.2 Langfuse to Canonical
+
+| Langfuse | Canonical | Transform |
+|----------|-----------|----------|
+| `observation.latency` (ms) | `gen_ai.client.operation.duration` | `/1000` |
+| `usage.input` | `gen_ai.usage.input_tokens` | 1:1 |
+| `usage.output` | `gen_ai.usage.output_tokens` | 1:1 |
+| `usage.totalCost` | `gen_ai.usage.cost` | `*1_000_000` |
+| `generation.model` | `gen_ai.request.model` | 1:1 |
+
+### 9.3 OpenInference to Canonical
+
+| OpenInference | Canonical | Transform |
+|---------------|-----------|----------|
+| `llm.latency` | `gen_ai.client.operation.duration` | `/1000` |
+| `llm.token_count.prompt` | `gen_ai.usage.input_tokens` | 1:1 |
+| `llm.token_count.completion` | `gen_ai.usage.output_tokens` | 1:1 |
+| `llm.cost.total` | `gen_ai.usage.cost` | `*1_000_000` |
+
+### 9.4 Arize Phoenix to Canonical
+
+| Phoenix | Canonical | Transform |
+|---------|-----------|----------|
+| `llm.latency_ms` | `gen_ai.client.operation.duration` | `/1000` |
+| `llm.token_count.prompt` | `gen_ai.usage.input_tokens` | 1:1 |
+| `llm.token_count.completion` | `gen_ai.usage.output_tokens` | 1:1 |
+
+### 9.5 AWS Bedrock to Canonical
+
+| Bedrock | Canonical | Transform |
+|---------|-----------|----------|
+| `inputTokenCount` | `gen_ai.usage.input_tokens` | 1:1 |
+| `outputTokenCount` | `gen_ai.usage.output_tokens` | 1:1 |
+| `TotalInferenceTime` | `gen_ai.client.operation.duration` | `/1000` |
+| `TimeToFirstByte` | `gen_ai.client.time_to_first_token` | `/1000` |
+| `ThrottlingException` count | `gen_ai.client.rate_limit.events` | 1:1 |
+
+> **SHOULD** implementers provide a shimming layer that automatically maps known source schemas to canonical names at ingestion time.
+
+---
+
+## 10. Working SDK Examples
+
+See the reference Python SDK at [`sdk/python/`](https://github.com/sauravGit/open-llm-observability/tree/main/sdk/python).
+
+### 10.1 Quick Start (Python)
 
 ```python
-from open_llm_obs import LLMObserver
+from open_llm_obs import LLMTracer, LLMetrics
 
-obs = LLMObserver(service_name="my-llm-app")
+# Initialize with your trace provider
+tracer = LLMTracer(service_name="my-llm-app")
+metrics = LLMetrics()
 
-with obs.record_request(
-    system="openai",
-    model="gpt-4o",
-    operation="chat"
-) as req:
-    response = openai_client.chat.completions.create(...)
-    req.set_token_usage(
+# Instrument an LLM call
+with tracer.trace_llm(operation="chat", model="gpt-4", system="openai") as span:
+    span.set_prompt(messages)
+    
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=messages,
+        max_tokens=500,
+        stream=False
+    )
+    
+    span.set_completion(
+        content=response.choices[0].message.content,
+        finish_reason=response.choices[0].finish_reason,
+        model=response.model
+    )
+    
+    metrics.record_tokens(
         input_tokens=response.usage.prompt_tokens,
-        output_tokens=response.usage.completion_tokens
+        output_tokens=response.usage.completion_tokens,
+        total_tokens=response.usage.total_tokens
+    )
+    
+    metrics.record_latency(response.usage.completion_tokens / 1000)  # approximate s
+```
+
+### 10.2 Streaming Example
+
+```python
+from open_llm_obs import LLMTracer, LLMetrics
+
+tracer = LLMTracer(service_name="streaming-app")
+metrics = LLMetrics()
+
+with tracer.trace_llm(operation="chat", model="gpt-4", system="openai") as span:
+    span.set_attribute("gen_ai.request.stream", True)
+    
+    stream = client.chat.completions.create(
+        model="gpt-4",
+        messages=messages,
+        stream=True
+    )
+    
+    first_token_time = None
+    content_parts = []
+    
+    for chunk in stream:
+        if first_token_time is None:
+            metrics.record_ttft(time.time() - request_start)  # Record TTFT
+            first_token_time = time.time()
+        
+        if chunk.choices[0].delta.content:
+            content_parts.append(chunk.choices[0].delta.content)
+    
+    span.set_completion(
+        content="".join(content_parts),
+        finish_reason=chunk.choices[0].finish_reason,
+        model=chunk.model
     )
 ```
 
-This emits:
-- `gen_ai.client.operation.duration` histogram
-- `gen_ai.usage.input_tokens` counter
-- `gen_ai.usage.output_tokens` counter
-- `gen_ai.client.error_rate` gauge (on error)
+---
+
+## 11. Dashboard Templates
+
+### 11.1 Core Observability Dashboard
+
+A Grafana dashboard is provided at [`dashboards/grafana/gen_ai_core.json`](https://github.com/sauravGit/open-llm-observability/tree/main/dashboards/grafana).
+
+**Panels:**
+1. Request rate (RPS) over time
+2. P50/P95/P99 latency histograms
+3. Token usage: input vs output over time
+4. Error rate and retry rate
+5. Cost per request (requires cost extension)
+6. TTFT for streaming endpoints
+7. Model/system breakdown
+
+### 11.2 Alert Rules
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| High latency | P95 > 10s for 5m | Warning |
+| Latency spike | P95 > 30s for 2m | Critical |
+| Error surge | Error rate > 5% for 5m | Critical |
+| Rate limit hit | rate_limit.events > 10/m | Warning |
+| Cost anomaly | Cost/request > 3x baseline | Warning |
+| TTFT degradation | P95 TTFT > 2s for 5m | Warning |
 
 ---
 
-## Dashboard Templates
+## 12. Agent & Tool-Call Span Naming
 
-Prometheus / Grafana queries using canonical metrics:
+**NEW in v0.4**
 
-```promql
-# P95 latency by model
-histogram_quantile(0.95, rate(gen_ai_client_operation_duration_bucket[5m]))
+When tracing agentic workloads, spans should follow this naming convention:
 
-# Input token rate
-rate(gen_ai_usage_input_tokens_total[5m])
+| Span Type | Span Name Pattern | Required Attributes |
+|-----------|-------------------|--------------------|
+| Chat/Completion | `gen_ai.chat.completion` | `gen_ai.system`, `gen_ai.request.model` |
+| Embedding | `gen_ai.embedding` | `gen_ai.system`, `gen_ai.request.model` |
+| Agent Task | `gen_ai.agent.run` | `gen_ai.agent.id`, `gen_ai.agent.task` |
+| Agent Step | `gen_ai.agent.step` | `gen_ai.agent.step.id`, `gen_ai.agent.tool.name` |
+| Tool Call | `gen_ai.tool.call` | `gen_ai.tool.name`, `gen_ai.tool.type` |
+| RAG Retrieval | `gen_ai.rag.retrieve` | `gen_ai.rag.query`, `gen_ai.rag.collection` |
+| RAG Rerank | `gen_ai.rag.rerank` | `gen_ai.rag.collection` |
 
-# Error rate %
-rate(gen_ai_client_error_count_total[5m]) /
-rate(gen_ai_client_request_count_total[5m]) * 100
-
-# Rate limit events
-rate(gen_ai_client_rate_limit_events_total[5m])
+**Parent-Child Hierarchy:**
+```
+gen_ai.agent.run
+├── gen_ai.rag.retrieve
+│   ├── gen_ai.tool.call (vector_db_query)
+├── gen_ai.chat.completion
+├── gen_ai.tool.call (search_api)
+├── gen_ai.chat.completion (reflection)
+└── gen_ai.rag.retrieve (final)
 ```
 
----
-
-## Real-World Use Cases
-
-1. **Multi-provider cost attribution** — same dashboard across OpenAI, Anthropic, Bedrock using canonical token + cost metrics
-2. **SLA alerting** — P95 latency alert fires regardless of which SDK/provider emits the signal
-3. **Streaming quality** — TTFT histogram identifies slow-start providers before users complain
-4. **Retry storm detection** — spike in `gen_ai.client.retry_count` surfaces upstream instability
-5. **Budget guardrails** — `gen_ai.usage.cost` with `gen_ai.system` label enables per-provider spend limits
+> **SHOULD** every agent step span include `gen_ai.agent.step.reason` explaining why that step was taken.
 
 ---
 
-## Upstream Path to OpenTelemetry
+## 13. Upstream Path to OpenTelemetry
 
-This RFC is filed as **[semantic-conventions-genai issue #101](https://github.com/open-telemetry/semantic-conventions-genai/issues/101)**, consolidating open issues #14, #23, #76, and #93 into a single proposal for SIG review.
+This RFC is filed as **OTel GenAI Issue #101**: [Proposal: Define a complete, stable gen_ai client metric set](https://github.com/open-telemetry/semantic-conventions-genai/issues/101).
 
-The intended path:
-1. SIG review and open questions resolved (cost unit, error instrument, TTFT attribute)
-2. PR against `open-telemetry/semantic-conventions-genai` with YAML definitions
-3. Stability marked `development` → `stable` following OTel lifecycle policy
-4. SDK implementations updated to stable names
+**Alignment with OTel GenAI spec:**
 
----
+| Proposed Canonical | OTel GenAI Spec | Status |
+|--------------------|-----------------|--------|
+| `gen_ai.client.operation.duration` | `gen_ai.client.operation.duration` | Already defined; adopt as-is |
+| `gen_ai.client.time_to_first_token` | `gen_ai.server.time_to_first_token` | Reconcile: client-side vs server-side distinction |
+| `gen_ai.usage.input_tokens` | `gen_ai.client.token.usage` (proposed) | Needs explicit `input`/`output`/`total` fields |
+| `gen_ai.usage.output_tokens` | (not yet defined) | NEW proposal |
+| `gen_ai.usage.total_tokens` | (not yet defined) | NEW proposal |
+| `gen_ai.usage.cost` | (not yet defined) | NEW proposal (extension pack) |
+| `gen_ai.client.error_count` | (not yet defined) | NEW proposal |
+| `gen_ai.client.retry_count` | (not yet defined) | NEW proposal |
+| `gen_ai.client.rate_limit.events` | (not yet defined) | NEW proposal |
+| `gen_ai.request.stream` | (not yet defined) | NEW proposal (v0.4) |
 
-## Versioning and Evolution Policy
-
-- `gen_ai.client.*` core metrics: stable after SIG approval, no breaking renames
-- Extension pack metrics: semver-prefixed (`gen_ai.rag.v1.*`), may evolve independently
-- Deprecated mappings kept for 2 minor versions before removal
-- All changes go through upstream OTel GenAI SIG PR process
-
----
-
-## Open Questions for the Community
-
-1. **Cost unit:** `usd` (float Counter) vs `{microdollar}` integer Counter to avoid floating-point drift?
-2. **Error rate instrument:** Gauge per-request vs counter pair (`error_count` / `total_count`) with ratio computed by backend?
-3. **TTFT streaming flag:** Should `gen_ai.client.time_to_first_token` carry a `gen_ai.response.streaming=true` required attribute, or be implied by presence of the metric?
-4. **Cost in core vs extension:** Is cost appropriate in the `core/` set, or should it be an optional `gen_ai.cost.*` extension given that not all providers publish pricing programmatically?
-5. **OpenInference alignment:** Should migration mappings from OpenInference be normative (MUST follow) or informative (SHOULD follow)?
+**Path to standardization:**
+1. SIG discussion and alignment on the consolidation proposal (Issue #101)
+2. Once consensus is reached, open a PR against `semantic-conventions-genai` to add new client-side attributes
+3. This RFC serves as the reference implementation for adopters during the transition period
 
 ---
 
-## Contributing
+## 14. Versioning and Evolution Policy
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). Discussion happens in:
-- [GitHub Discussions](https://github.com/sauravGit/open-llm-observability/discussions)
-- [OTel GenAI SIG issue #101](https://github.com/open-telemetry/semantic-conventions-genai/issues/101)
+**Specification Versioning:**
 
-PRs welcome for:
-- Additional migration mappings (Azure OpenAI, Google Vertex AI, Cohere, etc.)
-- Extension pack proposals
-- SDK implementations in Go, Java, Node.js
-- Grafana dashboard JSON exports
+| Status | Meaning | Breaking Changes Allowed |
+|--------|---------|-------------------------|
+| Draft | Experimental; subject to change | Yes |
+| Candidate | Proposed for standardization; stable | No |
+| Final | Adopted by OTel GenAI SIG | No |
+
+**Backward Compatibility:**
+- Canonical metric names, once published at Candidate status, MUST NOT be removed or renamed
+- New fields may be added as OPTIONAL before becoming REQUIRED in a future version
+- Breaking changes require a new version of the spec and at least 6 months deprecation notice
+
+**SDK Versioning:**
+- SDK follows semantic versioning (MAJOR.MINOR.PATCH)
+- Current SDK version: `0.4.0` (aligns with RFC v0.4)
+
+---
+
+## 15. Open Questions for the Community
+
+| # | Question | Current Status (v0.4) |
+|---|----------|----------------------|
+| 1 | **Cost unit:** `{microdollar}` integer vs `usd` float? | RECOMMENDATION: `{microdollar}` for precision. Awaiting SIG input. |
+| 2 | **Error rate instrument:** Counter (events) vs Gauge (rate)? | RESOLVED: Use Counter for events; compute rate as derived KPI. |
+| 3 | **TTFT streaming attribute:** Add `gen_ai.request.stream` boolean? | RESOLVED in v0.4: Yes, MUST on streaming spans. |
+| 4 | **Cost in core vs extension pack?** | RESOLVED: Extension pack only. Not all providers publish pricing. |
+| 5 | **OpenInference mapping normativity:** MUST or SHOULD? | RECOMMENDATION: SHOULD for interoperability, MUST for conformance badge. |
+| 6 | **Agent/tool-call span naming convention:** Standard format needed? | RESOLVED in v0.4: `gen_ai.agent.*` and `gen_ai.tool.*` patterns defined. |
+| 7 | **RAG retrieval: include relevance/recall metrics in spec?** | PENDING: Currently in RAG extension pack as SHOULD. Open for feedback. |
+
+Drop a comment on the [RFC discussion](https://github.com/sauravGit/open-llm-observability/discussions/1) or reply to [OTel GenAI #101](https://github.com/open-telemetry/semantic-conventions-genai/issues/101) to weigh in.
+
+---
+
+## 16. Contributing
+
+This is an open community effort. Here's how to get involved:
+
+### 16.1 Ways to Contribute
+
+- **Use the spec:** Instrument your LLM app with the Python SDK and share feedback
+- **Report issues:** Found a gap in the schema? Open an issue on this repo
+- **Submit PRs:** Add migration shims, SDK improvements, or dashboard templates
+- **Share with your team/tool:** If you use OpenLLMetry, Langfuse, Phoenix, or Bedrock, try the normalization layer
+- **Engage with OTel GenAI:** Weigh in on Issue #101 for upstream standardization
+
+### 16.2 Feedback Questions for Early Adopters
+
+- Does the core metric set cover your use cases?
+- Which migration shim would be most valuable (OpenLLMetry, Langfuse, OpenInference, Phoenix, Bedrock)?
+- Would you contribute a TypeScript SDK implementation?
+- Are the extension packs (RAG, Agent, Eval, Safety) useful, or do you need more/less?
+- What dashboard metrics do you actually care about in production?
+- Would migration from your current tool (Langfuse, OpenLLMetry, Phoenix, Bedrock) to canonical names be straightforward?
+- Any signals you wish existed but are missing from the current schema?
+
+### 16.3 Governance
+
+- Maintainer: sauravGit
+- License: [Apache 2.0](https://github.com/sauravGit/open-llm-observability/blob/main/LICENSE) (code), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) (spec)
+- Decision-making: Community consensus via GitHub discussions and issues
+- Roadmap: Posted in GitHub Discussions and updated quarterly
+
+---
+
+*This RFC is a living document. Version history and changelog are tracked at the top of this file.*
+*Last updated: 2026-05-12*replacement. It maps fragmented observability implementations across OpenLLMetry, Langfuse, OpenInference, Arize Phoenix, AWS Bedrock, and similar tools into canonical `gen_ai.*` semantic names.
+
